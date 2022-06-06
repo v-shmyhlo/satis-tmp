@@ -16,7 +16,7 @@ def main(data_dir):
 
 def preprocess_subset(data_dir, subset):
     data = pd.read_csv(os.path.join(data_dir, f"{subset}_action_classes.csv"))
-    for _, row in tqdm(data.iterrows(), desc="subset"):
+    for _, row in tqdm(data.iterrows(), total=len(data), desc=subset):
         preprocess_video(row, data_dir, subset)
 
 

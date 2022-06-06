@@ -1,58 +1,48 @@
-import imp
-import tempfile
-from operator import mod
-from contextlib import contextmanager
+import os
+
+import click
+import pandas as pd
 import torch
-import requests
+import torchvision.transforms as T
+from pytorchvideo.data.encoded_video import EncodedVideo
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
     ShortSideScale,
     UniformTemporalSubsample,
 )
-import csv
-from io import StringIO
-import torch
-import torch.nn.functional as F
-import torchvision.transforms as T
-from pytorchvideo.data.encoded_video import EncodedVideo
 from torchvision.transforms._transforms_video import NormalizeVideo
-from transforms import SpatialCrop, TemporalCrop, DepthNorm
-import cv2
-import glob
-from PIL import Image
+from tqdm import tqdm
+
+from transforms import SpatialCrop, TemporalCrop
 
 
 class ActionRecognizer:
     def __init__(self, device="cpu") -> None:
         self.device = device
 
-        response = requests.get(
-            "https://dl.fbaipublicfiles.com/omnivore/epic_action_classes.csv"
+        # Initialize class mapping
+        classes = pd.read_csv(
+            "https://dl.fbaipublicfiles.com/omnivore/epic_action_classes.csv",
+            names=["verb", "noun"],
         )
-        reader = csv.reader(StringIO(response.text))
-        self.epic_id_to_action = {
-            idx: " ".join(rows) for idx, rows in enumerate(reader)
-        }
+        classes = classes["verb"] + " " + classes["noun"]
+        classes = {c: i for i, c in enumerate(classes)}
+        self.classes = classes
 
-        model_name = "omnivore_swinB_epic"
-        model = torch.hub.load("facebookresearch/omnivore:main", model=model_name)
-
-        # Set to eval mode and move to desired device
+        # Initialize model
+        model = torch.hub.load(
+            "facebookresearch/omnivore:main", model="omnivore_swinB_epic"
+        )
         model = model.to(device)
         model = model.eval()
         self.model = model
 
-        num_frames = 32
-        sampling_rate = 2
-        frames_per_second = 30
-
-        clip_duration = (num_frames * sampling_rate) / frames_per_second
-
+        # Initialize preprocessing
         self.video_transform = ApplyTransformToKey(
             key="video",
             transform=T.Compose(
                 [
-                    UniformTemporalSubsample(num_frames),
+                    UniformTemporalSubsample(32),
                     T.Lambda(lambda x: x / 255.0),
                     ShortSideScale(size=224),
                     NormalizeVideo(
@@ -77,53 +67,40 @@ class ActionRecognizer:
         # Move the inputs to the desired device
         video_inputs = video_data["video"]
 
-        # Take the first clip
         # The model expects inputs of shape: B x C x T x H x W
         video_input = video_inputs[0][None, ...]
 
         # Pass the input clip through the model
         with torch.no_grad():
-            prediction = self.model(video_input.to(self.device), input_type="video")
-
-            # Get the predicted classes
-            pred_classes = prediction.topk(k=5).indices
-
-        # Map the predicted classes to the label names
-        pred_class_names = [self.epic_id_to_action[int(i)] for i in pred_classes[0]]
-        print("Top 5 predicted actions: %s" % ", ".join(pred_class_names))
-
-
-class Video:
-    def __init__(self, files) -> None:
-        self.files = files
-
-    @contextmanager
-    def write_tmp(self):
-        with tempfile.NamedTemporaryFile("wb", suffix=".mp4") as f:
-            frame = Image.open(self.files[0])
-            video = cv2.VideoWriter(
-                f.name,
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                24,
-                (frame.width, frame.height),
+            pred = self.model(video_input.to(self.device), input_type="video")
+            pred = (
+                pred[0, [self.classes["take bag"], self.classes["open bag"]]]
+                .data.cpu()
+                .numpy()
+                .tolist()
             )
-            for file in self.files:
-                video.write(cv2.imread(file))
-            video.release()
-
-            yield f.name
+            return pred
 
 
-def main():
+@click.command()
+@click.option("--data-dir", type=click.Path(), default="./satis-cv-ai-exercise-data")
+@click.option("--subset", type=str, default="val")
+def main(data_dir, subset):
+    data = pd.read_csv(os.path.join(data_dir, f"{subset}_action_classes.csv"))
     ar = ActionRecognizer()
 
-    data = [glob.glob("./satis-cv-ai-exercise-data/train/P01/P01_05/*.jpg")]
-    data = [sorted(x) for x in data]
-    data = [Video(x) for x in data]
+    scores = []
+    for _, row in tqdm(data.iterrows(), total=len(data)):
+        video_file = os.path.join(
+            data_dir,
+            f"{subset}_videos",
+            row["participant_id"] + "_" + row["video_id"] + ".mp4",
+        )
+        score = ar.predict(video_file)
+        scores.append(score)
 
-    for video in data:
-        with video.write_tmp() as filename:
-            x = ar.predict(filename)
+    data["take_bag_score"], data["open_bag_score"] = zip(*scores)
+    data.to_csv(os.path.join(data_dir, f"{subset}_predictions.csv"), index=False)
 
 
 if __name__ == "__main__":

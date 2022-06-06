@@ -1,10 +1,11 @@
 import glob
 import os
-from tqdm import tqdm
+
 import click
-from PIL import Image
 import cv2
 import pandas as pd
+from PIL import Image
+from tqdm import tqdm
 
 
 @click.command()
